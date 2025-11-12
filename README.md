@@ -1,4 +1,4 @@
-# EventDBX Python Client
+# EventDBX Client
 
 Official (preview) Python client for the [EventDBX](https://eventdbx.com) control-plane TCP protocol. This SDK mirrors the ergonomics of the existing JavaScript (`eventdbxjs`) and Rust (`eventdbx-client`) libraries so that Python developers can integrate EventDBX with only a few lines of code.
 
