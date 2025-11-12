@@ -102,6 +102,10 @@ pytest
 
 Merges to `main` automatically trigger `.github/workflows/publish.yml`, which installs system dependencies, runs the test suite, builds the wheel/sdist via `python -m build`, and then publishes the artifacts to PyPI with `pypa/gh-action-pypi-publish`. To enable publishing you must create a PyPI API token with project-scoped permissions and save it as the `PYPI_API_TOKEN` repository secret; the workflow will fail safely if the secret is missing.
 
+## Troubleshooting
+
+- `Getting requirements to build wheel ... error`: ensure Cap'n Proto is installed (`brew install capnp` or `apt-get install capnproto libcapnp-dev`) and retry `pip install pycapnp`. Installing the wheel ahead of time with `pip install pycapnp` inside your virtualenv often resolves lingering build issues.
+
 ## Contributing
 
 1. Fork and clone the repository, then create a feature branch.
