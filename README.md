@@ -9,6 +9,8 @@ python -m pip install --upgrade pip
 python -m pip install eventdbx
 ```
 
+> **System requirement**: `pycapnp` depends on the native Cap'n Proto toolkit. Install it first (e.g. `brew install capnp` on macOS, `apt-get install capnproto libcapnp-dev` on Debian/Ubuntu) before running `pip install`.
+
 ## Quickstart
 
 ```python
@@ -96,18 +98,13 @@ pip install -e .[dev]
 pytest
 ```
 
-## Publishing
+## Release automation
 
-1. Bump the `__version__` value in `src/eventdbx/__init__.py`.
-2. Build the artifacts:
+Merges to `main` automatically trigger `.github/workflows/publish.yml`, which installs system dependencies, runs the test suite, builds the wheel/sdist via `python -m build`, and then publishes the artifacts to PyPI with `pypa/gh-action-pypi-publish`. To enable publishing you must create a PyPI API token with project-scoped permissions and save it as the `PYPI_API_TOKEN` repository secret; the workflow will fail safely if the secret is missing.
 
-   ```bash
-   python -m pip install --upgrade build twine
-   python -m build
-   ```
+## Contributing
 
-3. Upload to PyPI (or TestPyPI) with Twine:
-
-   ```bash
-   python -m twine upload dist/*
-   ```
+1. Fork and clone the repository, then create a feature branch.
+2. Follow the development setup above (`pip install -e .[dev]`) and ensure formatting/linting still pass if you add new tools.
+3. Add or update tests alongside your changes (`pytest` should be green locally).
+4. Open a pull request with a clear description of the motivation and any follow-up work.

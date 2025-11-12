@@ -40,7 +40,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/eventdbx/eventdbx-python"
+Homepage = "https://eventdbx.com"
 Repository = "https://github.com/eventdbx/eventdbx-python"
 "Bug Tracker" = "https://github.com/eventdbx/eventdbx-python/issues"
 Documentation = "https://docs.eventdbx.com"
