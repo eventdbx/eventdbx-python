@@ -1,0 +1,14 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.mypy_cache/
+.pytest_cache/
+pip-wheel-metadata/
+.coverage
+/htmlcov
+/.idea
+/.vscode
