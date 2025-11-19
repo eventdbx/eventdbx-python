@@ -1,6 +1,6 @@
 """EventDBX Python client package."""
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 from .client import (
     AggregateSortField,
@@ -12,6 +12,7 @@ from .client import (
     GetAggregateResult,
     ListAggregatesResult,
     ListEventsResult,
+    RetryOptions,
     SelectAggregateResult,
 )
 from .control_schema import build_control_hello, load_control_schema
@@ -33,5 +34,6 @@ __all__ = [
     "SelectAggregateResult",
     "AggregateSortField",
     "AggregateSortOption",
+    "RetryOptions",
     "__version__",
 ]

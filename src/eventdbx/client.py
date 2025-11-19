@@ -5,11 +5,19 @@ from __future__ import annotations
 import json
 import socket
 import struct
+import time
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional, Protocol, Sequence, TypeVar
+
+try:  # pragma: no cover - optional dependency for retry handling
+    import capnp  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover
+    _CAPNP_EXCEPTIONS: tuple[type[BaseException], ...] = ()
+else:  # pragma: no cover
+    _CAPNP_EXCEPTIONS = (capnp.KjException,)
 
 from .control_schema import build_control_hello, load_control_schema
 from .noise import NoiseSession
@@ -30,6 +38,7 @@ __all__ = [
     "SelectAggregateResult",
     "AggregateSortField",
     "AggregateSortOption",
+    "RetryOptions",
 ]
 
 
@@ -109,6 +118,46 @@ class AggregateSortOption:
 
 
 @dataclass(slots=True)
+class RetryOptions:
+    """Configuration for retrying connection attempts and control-plane RPCs."""
+
+    attempts: int = 1
+    initial_delay_ms: int = 100
+    max_delay_ms: int = 1_000
+
+    def __post_init__(self) -> None:
+        if self.attempts <= 0:
+            raise ValueError("retry.attempts must be greater than zero")
+        if self.initial_delay_ms < 0:
+            raise ValueError("retry.initial_delay_ms cannot be negative")
+        if self.max_delay_ms < 0:
+            raise ValueError("retry.max_delay_ms cannot be negative")
+
+    @classmethod
+    def from_config(cls, config: RetryOptions | Mapping[str, Any] | None) -> "RetryOptions":
+        if config is None:
+            return cls()
+        if isinstance(config, RetryOptions):
+            return cls(
+                attempts=config.attempts,
+                initial_delay_ms=config.initial_delay_ms,
+                max_delay_ms=config.max_delay_ms,
+            )
+        attempts = int(config.get("attempts", 1))
+        initial = config.get("initial_delay_ms")
+        if initial is None:
+            initial = config.get("initialDelayMs", 100)
+        max_delay = config.get("max_delay_ms")
+        if max_delay is None:
+            max_delay = config.get("maxDelayMs", 1_000)
+        return cls(
+            attempts=attempts,
+            initial_delay_ms=int(initial),
+            max_delay_ms=int(max_delay),
+        )
+
+
+@dataclass(slots=True)
 class EventDBXAPIError(RuntimeError):
     """Represents logical errors returned by the EventDBX API."""
 
@@ -168,6 +217,8 @@ class EventDBXClient:
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         use_noise: bool = True,
         transport: FrameTransport | None = None,
+        retry: RetryOptions | Mapping[str, Any] | None = None,
+        verbose: bool = True,
     ) -> None:
         if not token:
             raise ValueError("token must be provided")
@@ -177,17 +228,22 @@ class EventDBXClient:
         self._token = token
         self._tenant_id = tenant_id
         self._protocol_version = protocol_version
+        self._host = host
+        self._port = port
+        self._connect_timeout = connect_timeout
+        self._read_timeout = read_timeout
+        self._use_noise = use_noise
         self._schema = load_control_schema()
+        self._verbose = verbose
         self._request_id = 0
+        self._retry_options = RetryOptions.from_config(retry)
+        self._sleep: Callable[[float], None] = time.sleep
+        self._owns_transport = transport is None
+        self._closed = False
         self._owned_transport: Optional[_SocketTransport] = None
+        self._transport: FrameTransport | None = None
+        self._noise: NoiseSession | None = None
 
-        if transport is None:
-            sock = socket.create_connection((host, port), timeout=connect_timeout)
-            sock.settimeout(read_timeout)
-            transport = _SocketTransport(sock)
-            self._owned_transport = transport
-
-        self._transport: FrameTransport | None = transport
         if not use_noise:
             warnings.warn(
                 "Disabling Noise is intended for testing only; the EventDBX control plane uses "
@@ -195,8 +251,18 @@ class EventDBXClient:
                 RuntimeWarning,
                 stacklevel=2,
             )
-        self._noise = NoiseSession(is_initiator=True) if use_noise else None
-        self._handshake()
+        if self._owns_transport:
+            self._run_with_retry(self._open_owned_transport_once, on_retry=self._handle_retryable_failure)
+        else:
+            if transport is None:
+                raise EventDBXConnectionError("Transport is not available")
+            self._transport = transport
+
+            def handshake_attempt() -> None:
+                self._reset_noise()
+                self._handshake()
+
+            self._run_with_retry(handshake_attempt, on_retry=None)
 
     # ------------------------------------------------------------------
     # Public API
@@ -207,6 +273,8 @@ class EventDBXClient:
             self._owned_transport.close()
             self._owned_transport = None
         self._transport = None
+        self._noise = None
+        self._closed = True
 
     def __enter__(self) -> "EventDBXClient":
         return self
@@ -232,8 +300,12 @@ class EventDBXClient:
         note: str | None = None,
         metadata_json: str | None = None,
         create: bool = False,
-    ) -> str:
-        """Apply an event. Set ``create`` to True to create a brand-new aggregate."""
+    ) -> str | bool:
+        """Apply an event. Set ``create`` to True to create a brand-new aggregate.
+
+        Returns either the event JSON (``verbose=True``) or ``True`` when verbose responses
+        are disabled.
+        """
 
         if create:
             return self.create_aggregate(
@@ -263,8 +335,8 @@ class EventDBXClient:
         payload_json: str,
         note: str | None = None,
         metadata_json: str | None = None,
-    ) -> str:
-        """Create a brand-new aggregate and return the aggregate JSON blob."""
+    ) -> str | bool:
+        """Create a brand-new aggregate and return either the aggregate JSON or ``True``."""
 
         return self.create_aggregate(
             aggregate_type=aggregate_type,
@@ -342,8 +414,8 @@ class EventDBXClient:
         patches: Sequence[Mapping[str, Any]],
         note: str | None = None,
         metadata_json: str | None = None,
-    ) -> str:
-        """Patch an existing event using a JSON patch document list."""
+    ) -> str | bool:
+        """Patch an existing event and return the updated event JSON or ``True``."""
 
         if not patches:
             raise ValueError("patches must contain at least one entry")
@@ -362,8 +434,8 @@ class EventDBXClient:
         aggregate_type: str,
         aggregate_id: str,
         comment: str | None = None,
-    ) -> str:
-        """Archive an aggregate."""
+    ) -> str | bool:
+        """Archive an aggregate and return the updated aggregate JSON or ``True``."""
 
         return self.set_aggregate_archive(
             aggregate_type=aggregate_type,
@@ -378,8 +450,8 @@ class EventDBXClient:
         aggregate_type: str,
         aggregate_id: str,
         comment: str | None = None,
-    ) -> str:
-        """Restore an archived aggregate."""
+    ) -> str | bool:
+        """Restore an archived aggregate and return the aggregate JSON or ``True``."""
 
         return self.set_aggregate_archive(
             aggregate_type=aggregate_type,
@@ -402,8 +474,8 @@ class EventDBXClient:
         payload_json: str,
         note: str | None = None,
         metadata_json: str | None = None,
-    ) -> str:
-        """Append a new event serialized as JSON; returns the Event JSON blob."""
+    ) -> str | bool:
+        """Append a new event and return the stored event JSON or ``True``."""
 
         if not aggregate_type or not aggregate_id or not event_type:
             raise ValueError("aggregate_type, aggregate_id and event_type must be provided")
@@ -427,7 +499,8 @@ class EventDBXClient:
                 raise EventDBXConnectionError("Unexpected response type for appendEvent")
             return payload.appendEvent.eventJson
 
-        return self._send_request(build_payload, handle_payload)
+        result = self._send_request(build_payload, handle_payload)
+        return self._mutation_result(result)
 
     def list_events(
         self,
@@ -595,8 +668,8 @@ class EventDBXClient:
         payload_json: str,
         note: str | None = None,
         metadata_json: str | None = None,
-    ) -> str:
-        """Create a brand new aggregate and return the aggregate JSON blob."""
+    ) -> str | bool:
+        """Create a brand new aggregate and return the aggregate JSON or ``True``."""
 
         if not aggregate_type or not aggregate_id or not event_type:
             raise ValueError("aggregate_type, aggregate_id and event_type must be provided")
@@ -620,7 +693,8 @@ class EventDBXClient:
                 raise EventDBXConnectionError("Unexpected response type for createAggregate")
             return payload.createAggregate.aggregateJson
 
-        return self._send_request(build_payload, handle_payload)
+        result = self._send_request(build_payload, handle_payload)
+        return self._mutation_result(result)
 
     def patch_event(
         self,
@@ -631,8 +705,8 @@ class EventDBXClient:
         patches: Sequence[Mapping[str, Any]],
         note: str | None = None,
         metadata_json: str | None = None,
-    ) -> str:
-        """Patch an existing event; returns the updated event JSON."""
+    ) -> str | bool:
+        """Patch an existing event and return the updated event JSON or ``True``."""
 
         if not aggregate_type or not aggregate_id or not event_type:
             raise ValueError("aggregate_type, aggregate_id and event_type must be provided")
@@ -658,7 +732,8 @@ class EventDBXClient:
                 raise EventDBXConnectionError("Unexpected response type for patchEvent")
             return payload.appendEvent.eventJson
 
-        return self._send_request(build_payload, handle_payload)
+        result = self._send_request(build_payload, handle_payload)
+        return self._mutation_result(result)
 
     def set_aggregate_archive(
         self,
@@ -667,8 +742,8 @@ class EventDBXClient:
         aggregate_id: str,
         archived: bool,
         comment: str | None = None,
-    ) -> str:
-        """Toggle the archive state for an aggregate."""
+    ) -> str | bool:
+        """Toggle the archive state for an aggregate and return JSON or ``True``."""
 
         if not aggregate_type or not aggregate_id:
             raise ValueError("aggregate_type and aggregate_id must be provided")
@@ -691,11 +766,96 @@ class EventDBXClient:
                 raise EventDBXConnectionError("Unexpected response type for setAggregateArchive")
             return payload.setAggregateArchive.aggregateJson
 
-        return self._send_request(build_payload, handle_payload)
+        result = self._send_request(build_payload, handle_payload)
+        return self._mutation_result(result)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _reset_noise(self) -> None:
+        self._noise = NoiseSession(is_initiator=True) if self._use_noise else None
+
+    def _open_owned_transport_once(self) -> None:
+        sock = socket.create_connection((self._host, self._port), timeout=self._connect_timeout)
+        sock.settimeout(self._read_timeout)
+        transport = _SocketTransport(sock)
+        self._transport = transport
+        self._owned_transport = transport
+        try:
+            self._reset_noise()
+            self._handshake()
+        except Exception:
+            transport.close()
+            self._owned_transport = None
+            self._transport = None
+            raise
+
+    def _ensure_transport(self) -> None:
+        if self._closed:
+            raise EventDBXConnectionError("Transport is not available")
+        if self._transport is not None:
+            return
+        if not self._owns_transport:
+            raise EventDBXConnectionError("Transport is not available")
+        self._open_owned_transport_once()
+
+    def _handle_retryable_failure(self, _error: BaseException | None = None) -> None:
+        self._noise = None
+        if self._owns_transport:
+            if self._owned_transport is not None:
+                self._owned_transport.close()
+                self._owned_transport = None
+            self._transport = None
+
+    def _mutation_result(self, value: str) -> str | bool:
+        """Return the raw JSON string or a boolean acknowledgement."""
+
+        return value if self._verbose else True
+
+    def _run_with_retry(
+        self,
+        operation: Callable[[], T],
+        *,
+        on_retry: Callable[[BaseException], None] | None,
+    ) -> T:
+        attempts = self._retry_options.attempts
+        delay = max(0.0, self._retry_options.initial_delay_ms / 1000.0)
+        max_delay = max(0.0, self._retry_options.max_delay_ms / 1000.0)
+
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return operation()
+            except EventDBXHandshakeError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_retryable_error(exc) or attempt == attempts:
+                    raise
+                if on_retry is not None:
+                    on_retry(exc)
+                if delay > 0:
+                    self._sleep(delay)
+                if max_delay <= 0.0:
+                    continue
+                next_delay = delay * 2 if delay > 0 else max_delay
+                delay = min(next_delay, max_delay)
+
+        if last_exc is None:
+            raise EventDBXConnectionError("Retry attempts exhausted")
+        raise last_exc
+
+    def _is_retryable_error(self, exc: BaseException) -> bool:
+        if isinstance(exc, EventDBXHandshakeError):
+            return False
+        if isinstance(exc, EventDBXConnectionError):
+            return True
+        if isinstance(exc, OSError):
+            return True
+        if _CAPNP_EXCEPTIONS and isinstance(exc, _CAPNP_EXCEPTIONS):
+            return True
+        return False
 
     def _handshake(self) -> None:
         if self._transport is None:
@@ -726,27 +886,29 @@ class EventDBXClient:
                 raise EventDBXHandshakeError(hello_response.message or "Handshake rejected")
 
     def _send_request(self, payload_builder: Callable[[Any], None], payload_handler: Callable[[Any], T]) -> T:
-        if self._transport is None:
-            raise EventDBXConnectionError("Transport is not available")
-
         self._request_id += 1
         request_id = self._request_id
-        request = self._schema.ControlRequest.new_message()
-        request.id = request_id
-        payload_builder(request.payload)
-        response_bytes = self._send_message(request.to_bytes())
 
-        response_cm = self._schema.ControlResponse.from_bytes(response_bytes)
-        with _capnp_message(response_cm) as response:
-            if response.id != request_id:
-                raise EventDBXConnectionError("Mismatched response identifier")
+        def perform_request() -> T:
+            self._ensure_transport()
+            request = self._schema.ControlRequest.new_message()
+            request.id = request_id
+            payload_builder(request.payload)
+            response_bytes = self._send_message(request.to_bytes())
 
-            payload = response.payload
-            if payload.which() == "error":
-                error = payload.error
-                raise EventDBXAPIError(code=error.code, message=error.message)
+            response_cm = self._schema.ControlResponse.from_bytes(response_bytes)
+            with _capnp_message(response_cm) as response:
+                if response.id != request_id:
+                    raise EventDBXConnectionError("Mismatched response identifier")
 
-            return payload_handler(payload)
+                payload = response.payload
+                if payload.which() == "error":
+                    error = payload.error
+                    raise EventDBXAPIError(code=error.code, message=error.message)
+
+                return payload_handler(payload)
+
+        return self._run_with_retry(perform_request, on_retry=self._handle_retryable_failure)
 
     def _send_message(self, payload: bytes) -> bytes:
         if self._transport is None:

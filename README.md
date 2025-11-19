@@ -67,6 +67,35 @@ Under the hood the client establishes a persistent TCP session, performs a Noise
 
 > **Note**: Noise transport security is enabled by default and should remain on outside of tightly controlled test scenarios.
 
+### Verbose responses
+
+`EventDBXClient` returns the stored JSON payloads for mutation commands by default (`apply`, `create`, `patch`, `archive`, and `restore`). To match deployments where the server is configured with `verbose_responses = false`, pass `verbose=False` to the client constructor. When verbose responses are disabled those methods resolve to a simple boolean acknowledgement instead of the serialized aggregate/event blob.
+
+```python
+client = EventDBXClient(token="control_token", tenant_id="tenant-123", verbose=False)
+assert client.archive(aggregate_type="orders", aggregate_id="ord_123") is True
+```
+
+### Retry configuration
+
+You can ask the client to automatically retry connection attempts and RPCs that fail due to transport/capnp errors. Retries are opt-in; by default each operation runs once and propagates the first error that surfaces. Pass a `retry` mapping (either snake_case or camelCase key names) or a `RetryOptions` instance to configure the behaviour:
+
+```python
+from eventdbx import EventDBXClient, RetryOptions
+
+client = EventDBXClient(
+    token="control_token",
+    tenant_id="tenant-123",
+    retry=RetryOptions(
+        attempts=4,          # initial try + 3 retries
+        initial_delay_ms=100,
+        max_delay_ms=2_000,
+    ),
+)
+```
+
+Only IO-level errors are retried—logical API errors are still raised immediately so you can handle them explicitly.
+
 ## Control plane schemas & Noise helpers
 
 If you need to work with the binary control plane, the package bundles the Cap'n Proto schemas and exposes a helper to load them on demand:
