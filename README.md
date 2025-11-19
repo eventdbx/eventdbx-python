@@ -16,9 +16,16 @@ python -m pip install eventdbx
 ```python
 import json
 
-from eventdbx import EventDBXClient
+from eventdbx import EventDBXClient, RetryOptions
 
-with EventDBXClient(token="control_token", tenant_id="tenant-123") as client:
+with EventDBXClient(
+    token="control_token",
+    tenant_id="tenant-123",
+    host="127.0.0.1",
+    port=6363,
+    verbose=True,  # set False to mirror verbose_responses = false on the server
+    retry=RetryOptions(attempts=3, initial_delay_ms=100, max_delay_ms=1_000),
+) as client:
     # Create a brand-new aggregate via the control plane
     created = client.create(
         aggregate_type="orders",
