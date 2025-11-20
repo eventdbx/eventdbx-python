@@ -43,7 +43,7 @@ with EventDBXClient(
     )
 
     # List aggregates or fetch events for a specific aggregate
-    aggregates = client.list(take=50)
+    aggregates = client.list(take=50, sort="created_at:desc, aggregate_id:asc")
     events_page = client.events(aggregate_type="orders", aggregate_id="ord_123")
 
     # Fetch full aggregate, run projections, or verify integrity
@@ -64,11 +64,11 @@ with EventDBXClient(
     )
 
     # Archive / restore lifecycle management
-    client.archive(aggregate_type="orders", aggregate_id="ord_123", comment="customer request")
+    client.archive(aggregate_type="orders", aggregate_id="ord_123", note="customer request")
     client.restore(aggregate_type="orders", aggregate_id="ord_123")
 ```
 
-`client.create(...)` bootstraps new aggregates, `client.list(...)` pages through aggregates, and `client.events(...)` lists events for an existing aggregate (use `client.apply(...)` or the lower-level `send_event(...)` helper to append new events).
+`client.create(...)` bootstraps new aggregates, `client.list(...)` pages through aggregates, and `client.events(...)` lists events for an existing aggregate (optionally filtered via `filter_expr`; use `client.apply(...)` or the lower-level `send_event(...)` helper to append new events).
 
 Under the hood the client establishes a persistent TCP session, performs a Noise XX handshake, and exchanges Cap'n Proto encoded control messages with the EventDBX control plane.
 
@@ -129,8 +129,8 @@ responder.read_message(step1)
 ## Development
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e .[dev]
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ."[dev]"
 pytest
 ```
 

@@ -170,6 +170,28 @@ def test_events_api_returns_result() -> None:
         assert sent_request.payload.which() == "listEvents"
 
 
+def test_events_accepts_filter_expression() -> None:
+    schema = load_control_schema()
+    client, transport = _make_client()
+
+    response = schema.ControlResponse.new_message()
+    response.id = 1
+    payload = response.payload.init("listEvents")
+    payload.eventsJson = "[]"
+    payload.hasNextCursor = False
+    transport.queue_response(response.to_bytes())
+
+    result = client.events(
+        aggregate_type="order", aggregate_id="ord_1", filter_expr="version > 2"
+    )
+
+    assert result.events_json == "[]"
+    with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
+        payload = sent_request.payload.listEvents
+        assert payload.hasFilter is True
+        assert payload.filter == "version > 2"
+
+
 def test_events_error_payload_raises_api_error() -> None:
     schema = load_control_schema()
     client, transport = _make_client()
@@ -216,7 +238,7 @@ def test_list_aggregates_via_list_api_with_sort_and_pagination_metadata() -> Non
     payload.hasNextCursor = True
     transport.queue_response(response.to_bytes())
 
-    sort_option = AggregateSortOption(field=AggregateSortField.VERSION, descending=True)
+    sort_option = AggregateSortOption(field=AggregateSortField.CREATED_AT, descending=True)
     result = client.list(take=10, sort=[sort_option], include_archived=True)
 
     assert result.aggregates_json == "[]"
@@ -224,9 +246,27 @@ def test_list_aggregates_via_list_api_with_sort_and_pagination_metadata() -> Non
     with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
         payload = sent_request.payload.listAggregates
         assert payload.hasSort is True
-        assert payload.sort[0].field == AggregateSortField.VERSION.value
-        assert payload.sort[0].descending is True
+        assert payload.sort == f"{AggregateSortField.CREATED_AT.value}:desc"
         assert payload.includeArchived is True
+
+
+def test_list_aggregates_accepts_sort_string() -> None:
+    schema = load_control_schema()
+    client, transport = _make_client()
+
+    response = schema.ControlResponse.new_message()
+    response.id = 1
+    payload = response.payload.init("listAggregates")
+    payload.aggregatesJson = "[]"
+    transport.queue_response(response.to_bytes())
+
+    result = client.list(sort="aggregate_type:asc, aggregate_id:desc")
+
+    assert result.aggregates_json == "[]"
+    with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
+        payload = sent_request.payload.listAggregates
+        assert payload.hasSort is True
+        assert payload.sort == "aggregate_type:asc, aggregate_id:desc"
 
 
 def test_get_aggregate_handles_not_found() -> None:
@@ -332,9 +372,13 @@ def test_archive_and_restore_return_json() -> None:
     payload.aggregateJson = "{}"
     transport.queue_response(response.to_bytes())
 
-    assert (
-        client.archive(aggregate_type="order", aggregate_id="ord", comment="test") == "{}"
-    )
+    assert client.archive(aggregate_type="order", aggregate_id="ord", note="test") == "{}"
+
+    with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
+        archive_payload = sent_request.payload.setAggregateArchive
+        assert archive_payload.hasNote is True
+        assert archive_payload.note == "test"
+        assert archive_payload.archived is True
 
     response = schema.ControlResponse.new_message()
     response.id = 2
@@ -343,6 +387,11 @@ def test_archive_and_restore_return_json() -> None:
     transport.queue_response(response.to_bytes())
 
     assert client.restore(aggregate_type="order", aggregate_id="ord") == "{}"
+
+    with schema.ControlRequest.from_bytes(transport.sent_frames[2]) as sent_request:
+        restore_payload = sent_request.payload.setAggregateArchive
+        assert restore_payload.hasNote is False
+        assert restore_payload.archived is False
 
 
 def test_archive_returns_bool_when_verbose_disabled() -> None:
@@ -355,9 +404,31 @@ def test_archive_returns_bool_when_verbose_disabled() -> None:
     payload.aggregateJson = "{}"
     transport.queue_response(response.to_bytes())
 
-    result = client.archive(aggregate_type="order", aggregate_id="ord", comment="test")
+    result = client.archive(aggregate_type="order", aggregate_id="ord", note="test")
 
     assert result is True
+    with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
+        payload = sent_request.payload.setAggregateArchive
+        assert payload.hasNote is True
+        assert payload.note == "test"
+
+
+def test_archive_accepts_legacy_comment_alias() -> None:
+    schema = load_control_schema()
+    client, transport = _make_client()
+
+    response = schema.ControlResponse.new_message()
+    response.id = 1
+    payload = response.payload.init("setAggregateArchive")
+    payload.aggregateJson = "{}"
+    transport.queue_response(response.to_bytes())
+
+    client.archive(aggregate_type="order", aggregate_id="ord", comment="legacy")
+
+    with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
+        payload = sent_request.payload.setAggregateArchive
+        assert payload.hasNote is True
+        assert payload.note == "legacy"
 
 
 def test_retry_reuses_custom_transport_on_failure() -> None:

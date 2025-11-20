@@ -27,7 +27,7 @@ struct ControlResponse {
     error @7 :ControlError;
     createAggregate @8 :CreateAggregateResponse;
     setAggregateArchive @9 :SetAggregateArchiveResponse;
-    }
+  }
 }
 
 struct ControlHello {
@@ -48,7 +48,7 @@ struct ListAggregatesRequest {
   hasTake @3 :Bool;
   filter @4 :Text;
   hasFilter @5 :Bool;
-  sort @6 :List(AggregateSort);
+  sort @6 :Text;
   hasSort @7 :Bool;
   includeArchived @8 :Bool;
   archivedOnly @9 :Bool;
@@ -160,25 +160,12 @@ struct SetAggregateArchiveRequest {
   aggregateType @1 :Text;
   aggregateId @2 :Text;
   archived @3 :Bool;
-  comment @4 :Text;
-  hasComment @5 :Bool;
+  note @4 :Text;
+  hasNote @5 :Bool;
 }
 
 struct SetAggregateArchiveResponse {
   aggregateJson @0 :Text;
-}
-
-struct AggregateSort {
-  field @0 :AggregateSortField;
-  descending @1 :Bool;
-}
-
-enum AggregateSortField {
-  aggregateType @0;
-  aggregateId @1;
-  version @2;
-  merkleRoot @3;
-  archived @4;
 }
 
 struct ControlError {

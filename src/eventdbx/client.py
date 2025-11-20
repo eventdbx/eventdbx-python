@@ -104,11 +104,11 @@ class SelectAggregateResult:
 
 
 class AggregateSortField(str, Enum):
-    AGGREGATE_TYPE = "aggregateType"
-    AGGREGATE_ID = "aggregateId"
-    VERSION = "version"
-    MERKLE_ROOT = "merkleRoot"
+    AGGREGATE_TYPE = "aggregate_type"
+    AGGREGATE_ID = "aggregate_id"
     ARCHIVED = "archived"
+    CREATED_AT = "created_at"
+    UPDATED_AT = "updated_at"
 
 
 @dataclass(slots=True)
@@ -353,7 +353,7 @@ class EventDBXClient:
         cursor: str | None = None,
         take: int | None = None,
         filter_expr: str | None = None,
-        sort: list[AggregateSortOption] | None = None,
+        sort: str | list[AggregateSortOption] | None = None,
         include_archived: bool | None = None,
         archived_only: bool | None = None,
     ) -> ListAggregatesResult:
@@ -375,14 +375,16 @@ class EventDBXClient:
         aggregate_id: str,
         cursor: str | None = None,
         take: int | None = None,
+        filter_expr: str | None = None,
     ) -> ListEventsResult:
-        """Return a page of events for a specific aggregate."""
+        """Return a page of events for a specific aggregate with optional filtering."""
 
         return self.list_events(
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
             cursor=cursor,
             take=take,
+            filter_expr=filter_expr,
         )
 
     def get(self, *, aggregate_type: str, aggregate_id: str) -> GetAggregateResult:
@@ -433,14 +435,16 @@ class EventDBXClient:
         *,
         aggregate_type: str,
         aggregate_id: str,
+        note: str | None = None,
         comment: str | None = None,
     ) -> str | bool:
-        """Archive an aggregate and return the updated aggregate JSON or ``True``."""
+        """Archive an aggregate, optionally recording a note, and return JSON or ``True``."""
 
         return self.set_aggregate_archive(
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
             archived=True,
+            note=note,
             comment=comment,
         )
 
@@ -449,14 +453,16 @@ class EventDBXClient:
         *,
         aggregate_type: str,
         aggregate_id: str,
+        note: str | None = None,
         comment: str | None = None,
     ) -> str | bool:
-        """Restore an archived aggregate and return the aggregate JSON or ``True``."""
+        """Restore an archived aggregate, optionally recording a note, and return JSON or ``True``."""
 
         return self.set_aggregate_archive(
             aggregate_type=aggregate_type,
             aggregate_id=aggregate_id,
             archived=False,
+            note=note,
             comment=comment,
         )
 
@@ -509,8 +515,9 @@ class EventDBXClient:
         aggregate_id: str,
         cursor: str | None = None,
         take: int | None = None,
+        filter_expr: str | None = None,
     ) -> ListEventsResult:
-        """Fetch a page of events as JSON plus pagination metadata."""
+        """Fetch a page of events with optional pagination and filter metadata."""
 
         if not aggregate_type or not aggregate_id:
             raise ValueError("aggregate_type and aggregate_id must be provided")
@@ -526,6 +533,9 @@ class EventDBXClient:
             if take is not None:
                 request.take = take
                 request.hasTake = True
+            if filter_expr is not None:
+                request.filter = filter_expr
+                request.hasFilter = True
 
         def handle_payload(payload: Any) -> ListEventsResult:
             if payload.which() != "listEvents":
@@ -546,11 +556,13 @@ class EventDBXClient:
         cursor: str | None = None,
         take: int | None = None,
         filter_expr: str | None = None,
-        sort: list[AggregateSortOption] | None = None,
+        sort: str | list[AggregateSortOption] | None = None,
         include_archived: bool | None = None,
         archived_only: bool | None = None,
     ) -> ListAggregatesResult:
         """List aggregates and return pagination info."""
+
+        sort_text = self._encode_sort_options(sort)
 
         def build_payload(container):
             request = container.init("listAggregates")
@@ -564,12 +576,9 @@ class EventDBXClient:
             if filter_expr is not None:
                 request.filter = filter_expr
                 request.hasFilter = True
-            if sort:
+            if sort_text is not None:
+                request.sort = sort_text
                 request.hasSort = True
-                sort_list = request.init("sort", len(sort))
-                for idx, option in enumerate(sort):
-                    sort_list[idx].field = option.field.value
-                    sort_list[idx].descending = option.descending
             if include_archived is not None:
                 request.includeArchived = include_archived
             if archived_only is not None:
@@ -741,6 +750,7 @@ class EventDBXClient:
         aggregate_type: str,
         aggregate_id: str,
         archived: bool,
+        note: str | None = None,
         comment: str | None = None,
     ) -> str | bool:
         """Toggle the archive state for an aggregate and return JSON or ``True``."""
@@ -748,18 +758,20 @@ class EventDBXClient:
         if not aggregate_type or not aggregate_id:
             raise ValueError("aggregate_type and aggregate_id must be provided")
 
+        final_note = self._resolve_note(note=note, comment=comment)
+
         def build_payload(container):
             request = container.init("setAggregateArchive")
             request.token = self._token
             request.aggregateType = aggregate_type
             request.aggregateId = aggregate_id
             request.archived = archived
-            if comment:
-                request.comment = comment
-                request.hasComment = True
-            elif comment is not None:
-                request.comment = ""
-                request.hasComment = True
+            if final_note is not None:
+                request.note = final_note
+                request.hasNote = True
+            else:
+                request.note = ""
+                request.hasNote = False
 
         def handle_payload(payload: Any) -> str:
             if payload.which() != "setAggregateArchive":
@@ -807,6 +819,35 @@ class EventDBXClient:
                 self._owned_transport.close()
                 self._owned_transport = None
             self._transport = None
+
+    def _resolve_note(self, *, note: str | None, comment: str | None) -> str | None:
+        """Prefer the new ``note`` field while keeping ``comment`` as a legacy alias."""
+
+        if note is not None and comment is not None and note != comment:
+            raise ValueError("Provide either note or comment, not both")
+        return note if note is not None else comment
+
+    def _encode_sort_options(self, sort: str | list[AggregateSortOption] | None) -> str | None:
+        """Encode sort directives as a comma-separated string (``field:order``)."""
+
+        if sort is None:
+            return None
+
+        if isinstance(sort, str):
+            directive = sort.strip()
+            if not directive:
+                return None
+            return directive
+
+        if not sort:
+            return None
+
+        segments = []
+        for option in sort:
+            order = "desc" if option.descending else "asc"
+            segments.append(f"{option.field.value}:{order}")
+
+        return ", ".join(segments)
 
     def _mutation_result(self, value: str) -> str | bool:
         """Return the raw JSON string or a boolean acknowledgement."""
