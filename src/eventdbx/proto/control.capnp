@@ -1,5 +1,7 @@
 @0xc3d1ec2a1e3f5b26;
 
+using Schema = import "schema.capnp";
+
 struct ControlRequest {
   id @0 :UInt64;
   payload :union {
@@ -12,6 +14,18 @@ struct ControlRequest {
     selectAggregate @7 :SelectAggregateRequest;
     createAggregate @8 :CreateAggregateRequest;
     setAggregateArchive @9 :SetAggregateArchiveRequest;
+    listSchemas @10 :Schema.ListSchemasRequest;
+    replaceSchemas @11 :Schema.ReplaceSchemasRequest;
+    tenantAssign @12 :Schema.TenantAssignRequest;
+    tenantUnassign @13 :Schema.TenantUnassignRequest;
+    tenantQuotaSet @14 :Schema.TenantQuotaSetRequest;
+    tenantQuotaClear @15 :Schema.TenantQuotaClearRequest;
+    tenantQuotaRecalc @16 :Schema.TenantQuotaRecalcRequest;
+    tenantReload @17 :Schema.TenantReloadRequest;
+    tenantSchemaPublish @18 :Schema.TenantSchemaPublishRequest;
+    createSnapshot @19 :CreateSnapshotRequest;
+    listSnapshots @20 :ListSnapshotsRequest;
+    getSnapshot @21 :GetSnapshotRequest;
   }
 }
 
@@ -27,6 +41,18 @@ struct ControlResponse {
     error @7 :ControlError;
     createAggregate @8 :CreateAggregateResponse;
     setAggregateArchive @9 :SetAggregateArchiveResponse;
+    listSchemas @10 :Schema.ListSchemasResponse;
+    replaceSchemas @11 :Schema.ReplaceSchemasResponse;
+    tenantAssign @12 :Schema.TenantAssignResponse;
+    tenantUnassign @13 :Schema.TenantUnassignResponse;
+    tenantQuotaSet @14 :Schema.TenantQuotaSetResponse;
+    tenantQuotaClear @15 :Schema.TenantQuotaClearResponse;
+    tenantQuotaRecalc @16 :Schema.TenantQuotaRecalcResponse;
+    tenantReload @17 :Schema.TenantReloadResponse;
+    tenantSchemaPublish @18 :Schema.TenantSchemaPublishResponse;
+    createSnapshot @19 :CreateSnapshotResponse;
+    listSnapshots @20 :ListSnapshotsResponse;
+    getSnapshot @21 :GetSnapshotResponse;
   }
 }
 
@@ -100,6 +126,8 @@ struct AppendEventRequest {
   hasNote @6 :Bool;
   metadataJson @7 :Text;
   hasMetadata @8 :Bool;
+  publishTargets @9 :List(PublishTarget);
+  hasPublishTargets @10 :Bool;
 }
 
 struct AppendEventResponse {
@@ -116,6 +144,8 @@ struct PatchEventRequest {
   hasNote @6 :Bool;
   metadataJson @7 :Text;
   hasMetadata @8 :Bool;
+  publishTargets @9 :List(PublishTarget);
+  hasPublishTargets @10 :Bool;
 }
 
 struct VerifyAggregateRequest {
@@ -149,6 +179,8 @@ struct CreateAggregateRequest {
   hasNote @6 :Bool;
   metadataJson @7 :Text;
   hasMetadata @8 :Bool;
+  publishTargets @9 :List(PublishTarget);
+  hasPublishTargets @10 :Bool;
 }
 
 struct CreateAggregateResponse {
@@ -166,6 +198,50 @@ struct SetAggregateArchiveRequest {
 
 struct SetAggregateArchiveResponse {
   aggregateJson @0 :Text;
+}
+
+struct CreateSnapshotRequest {
+  token @0 :Text;
+  aggregateType @1 :Text;
+  aggregateId @2 :Text;
+  comment @3 :Text;
+  hasComment @4 :Bool;
+}
+
+struct CreateSnapshotResponse {
+  snapshotJson @0 :Text;
+}
+
+struct PublishTarget {
+  plugin @0 :Text;
+  mode @1 :Text;
+  hasMode @2 :Bool;
+  priority @3 :Text;
+  hasPriority @4 :Bool;
+}
+
+struct ListSnapshotsRequest {
+  token @0 :Text;
+  aggregateType @1 :Text;
+  aggregateId @2 :Text;
+  hasAggregateType @3 :Bool;
+  hasAggregateId @4 :Bool;
+  version @5 :UInt64;
+  hasVersion @6 :Bool;
+}
+
+struct ListSnapshotsResponse {
+  snapshotsJson @0 :Text;
+}
+
+struct GetSnapshotRequest {
+  token @0 :Text;
+  snapshotId @1 :UInt64;
+}
+
+struct GetSnapshotResponse {
+  found @0 :Bool;
+  snapshotJson @1 :Text;
 }
 
 struct ControlError {

@@ -114,16 +114,22 @@ hello = build_control_hello(protocol_version=1, token="api", tenant_id="tenant")
 serialized = hello.to_bytes()
 ```
 
-For encrypted transport the `eventdbx.noise.NoiseSession` class wraps the `noiseprotocol` implementation using the `Noise_XX_25519_AESGCM_SHA256` pattern:
+For encrypted transport the `eventdbx.noise.NoiseSession` class wraps the `noiseprotocol` implementation using the `Noise_NNpsk0_25519_ChaChaPoly_SHA256` pattern with a derived pre-shared key:
 
 ```python
-from eventdbx.noise import NoiseSession
+from eventdbx.noise import NoiseSession, derive_psk
 
-initiator = NoiseSession(is_initiator=True)
-responder = NoiseSession(is_initiator=False)
+psk = derive_psk("control-token")
+initiator = NoiseSession(is_initiator=True, psk=psk)
+responder = NoiseSession(is_initiator=False, psk=psk)
 
-step1 = initiator.write_message()
+step1 = initiator.write_message()  # e, psk
 responder.read_message(step1)
+step2 = responder.write_message()  # e, psk
+initiator.read_message(step2)
+
+encrypted = initiator.encrypt(b"payload")
+plaintext = responder.decrypt(encrypted)
 ```
 
 ## Development

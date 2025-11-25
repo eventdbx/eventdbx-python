@@ -20,7 +20,7 @@ else:  # pragma: no cover
     _CAPNP_EXCEPTIONS = (capnp.KjException,)
 
 from .control_schema import build_control_hello, load_control_schema
-from .noise import NoiseSession
+from .noise import NoiseSession, derive_psk
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 6363
@@ -36,6 +36,12 @@ __all__ = [
     "ListEventsResult",
     "GetAggregateResult",
     "SelectAggregateResult",
+    "ListSnapshotsResult",
+    "GetSnapshotResult",
+    "PublishTarget",
+    "TenantAssignResult",
+    "TenantQuotaResult",
+    "TenantSchemaPublishResult",
     "AggregateSortField",
     "AggregateSortOption",
     "RetryOptions",
@@ -101,6 +107,48 @@ class GetAggregateResult:
 class SelectAggregateResult:
     found: bool
     selection_json: Optional[str]
+
+
+@dataclass(slots=True)
+class ListSnapshotsResult:
+    snapshots_json: str
+
+
+@dataclass(slots=True)
+class GetSnapshotResult:
+    found: bool
+    snapshot_json: Optional[str]
+
+
+@dataclass(slots=True)
+class PublishTarget:
+    plugin: str
+    mode: str | None = None
+    priority: str | None = None
+
+    def __post_init__(self) -> None:
+        if not self.plugin:
+            raise ValueError("publish target plugin must be provided")
+
+
+@dataclass(slots=True)
+class TenantAssignResult:
+    changed: bool
+    shard_id: str
+
+
+@dataclass(slots=True)
+class TenantQuotaResult:
+    changed: bool
+    quota_mb: int | None
+    has_quota: bool
+
+
+@dataclass(slots=True)
+class TenantSchemaPublishResult:
+    version_id: str
+    activated: bool
+    skipped: bool
 
 
 class AggregateSortField(str, Enum):
@@ -189,6 +237,38 @@ class _SocketTransport:
         except OSError:
             pass
         self._socket.close()
+
+    def send_unframed(self, payload: bytes) -> None:
+        """Send bytes without the length prefix (used for the initial hello)."""
+
+        self._socket.sendall(payload)
+
+    def recv_capnp_message(self) -> bytes:
+        """Read a single Cap'n Proto message from the raw socket without framing.
+
+        This mirrors the segment framing used by capnp::{write,read}_message in the Rust client:
+        - First word: segment count - 1 (u32 LE)
+        - Next words: segment lengths (u32 LE), padded to an even count
+        - Segment payloads: N 64-bit words
+        """
+
+        header = self._recv_exact(8)
+        seg_count_minus_one = struct.unpack("<I", header[:4])[0]
+        segment_count = seg_count_minus_one + 1
+        first_len = struct.unpack("<I", header[4:])[0]
+
+        padding_words = 1 if segment_count % 2 == 1 else 0
+        remaining_words = segment_count - 1 + padding_words
+        remaining_header = self._recv_exact(remaining_words * 4) if remaining_words else b""
+
+        lengths_words = [first_len]
+        if segment_count > 1:
+            extra_lengths = struct.unpack("<" + "I" * (segment_count - 1), remaining_header[: 4 * (segment_count - 1)])
+            lengths_words.extend(extra_lengths)
+
+        total_words = sum(lengths_words)
+        body = self._recv_exact(total_words * 8) if total_words else b""
+        return header + remaining_header + body
 
     def _recv_exact(self, size: int) -> bytes:
         data = bytearray()
@@ -299,6 +379,7 @@ class EventDBXClient:
         payload_json: str,
         note: str | None = None,
         metadata_json: str | None = None,
+        publish_targets: Sequence[PublishTarget | Mapping[str, Any]] | None = None,
         create: bool = False,
     ) -> str | bool:
         """Apply an event. Set ``create`` to True to create a brand-new aggregate.
@@ -315,6 +396,7 @@ class EventDBXClient:
                 payload_json=payload_json,
                 note=note,
                 metadata_json=metadata_json,
+                publish_targets=publish_targets,
             )
 
         return self.send_event(
@@ -324,6 +406,7 @@ class EventDBXClient:
             payload_json=payload_json,
             note=note,
             metadata_json=metadata_json,
+            publish_targets=publish_targets,
         )
 
     def create(
@@ -335,6 +418,7 @@ class EventDBXClient:
         payload_json: str,
         note: str | None = None,
         metadata_json: str | None = None,
+        publish_targets: Sequence[PublishTarget | Mapping[str, Any]] | None = None,
     ) -> str | bool:
         """Create a brand-new aggregate and return either the aggregate JSON or ``True``."""
 
@@ -345,6 +429,7 @@ class EventDBXClient:
             payload_json=payload_json,
             note=note,
             metadata_json=metadata_json,
+            publish_targets=publish_targets,
         )
 
     def list(
@@ -480,6 +565,7 @@ class EventDBXClient:
         payload_json: str,
         note: str | None = None,
         metadata_json: str | None = None,
+        publish_targets: Sequence[PublishTarget | Mapping[str, Any]] | None = None,
     ) -> str | bool:
         """Append a new event and return the stored event JSON or ``True``."""
 
@@ -499,6 +585,7 @@ class EventDBXClient:
             if metadata_json is not None:
                 request.metadataJson = metadata_json
                 request.hasMetadata = True
+            self._init_publish_targets(request, publish_targets)
 
         def handle_payload(payload: Any) -> str:
             if payload.which() != "appendEvent":
@@ -677,6 +764,7 @@ class EventDBXClient:
         payload_json: str,
         note: str | None = None,
         metadata_json: str | None = None,
+        publish_targets: Sequence[PublishTarget | Mapping[str, Any]] | None = None,
     ) -> str | bool:
         """Create a brand new aggregate and return the aggregate JSON or ``True``."""
 
@@ -696,6 +784,7 @@ class EventDBXClient:
             if metadata_json is not None:
                 request.metadataJson = metadata_json
                 request.hasMetadata = True
+            self._init_publish_targets(request, publish_targets)
 
         def handle_payload(payload: Any) -> str:
             if payload.which() != "createAggregate":
@@ -714,6 +803,7 @@ class EventDBXClient:
         patches: Sequence[Mapping[str, Any]],
         note: str | None = None,
         metadata_json: str | None = None,
+        publish_targets: Sequence[PublishTarget | Mapping[str, Any]] | None = None,
     ) -> str | bool:
         """Patch an existing event and return the updated event JSON or ``True``."""
 
@@ -735,6 +825,7 @@ class EventDBXClient:
             if metadata_json is not None:
                 request.metadataJson = metadata_json
                 request.hasMetadata = True
+            self._init_publish_targets(request, publish_targets)
 
         def handle_payload(payload: Any) -> str:
             if payload.which() != "appendEvent":
@@ -781,12 +872,283 @@ class EventDBXClient:
         result = self._send_request(build_payload, handle_payload)
         return self._mutation_result(result)
 
+    def create_snapshot(
+        self,
+        *,
+        aggregate_type: str,
+        aggregate_id: str,
+        comment: str | None = None,
+    ) -> str | bool:
+        """Create a point-in-time snapshot for an aggregate."""
+
+        if not aggregate_type or not aggregate_id:
+            raise ValueError("aggregate_type and aggregate_id must be provided")
+
+        def build_payload(container):
+            request = container.init("createSnapshot")
+            request.token = self._token
+            request.aggregateType = aggregate_type
+            request.aggregateId = aggregate_id
+            if comment is not None:
+                request.comment = comment
+                request.hasComment = True
+
+        def handle_payload(payload: Any) -> str:
+            if payload.which() != "createSnapshot":
+                raise EventDBXConnectionError("Unexpected response type for createSnapshot")
+            return payload.createSnapshot.snapshotJson
+
+        result = self._send_request(build_payload, handle_payload)
+        return self._mutation_result(result)
+
+    def list_snapshots(
+        self,
+        *,
+        aggregate_type: str | None = None,
+        aggregate_id: str | None = None,
+        version: int | None = None,
+    ) -> ListSnapshotsResult:
+        """List snapshots, optionally filtered by aggregate or version."""
+
+        def build_payload(container):
+            request = container.init("listSnapshots")
+            request.token = self._token
+            if aggregate_type is not None:
+                request.aggregateType = aggregate_type
+                request.hasAggregateType = True
+            if aggregate_id is not None:
+                request.aggregateId = aggregate_id
+                request.hasAggregateId = True
+            if version is not None:
+                request.version = version
+                request.hasVersion = True
+
+        def handle_payload(payload: Any) -> ListSnapshotsResult:
+            if payload.which() != "listSnapshots":
+                raise EventDBXConnectionError("Unexpected response type for listSnapshots")
+            return ListSnapshotsResult(snapshots_json=payload.listSnapshots.snapshotsJson)
+
+        return self._send_request(build_payload, handle_payload)
+
+    def get_snapshot(self, *, snapshot_id: int) -> GetSnapshotResult:
+        """Fetch a specific snapshot by identifier."""
+
+        if snapshot_id is None or snapshot_id < 0:
+            raise ValueError("snapshot_id must be non-negative")
+
+        def build_payload(container):
+            request = container.init("getSnapshot")
+            request.token = self._token
+            request.snapshotId = snapshot_id
+
+        def handle_payload(payload: Any) -> GetSnapshotResult:
+            if payload.which() != "getSnapshot":
+                raise EventDBXConnectionError("Unexpected response type for getSnapshot")
+            data = payload.getSnapshot
+            snapshot_json = data.snapshotJson if data.found else None
+            return GetSnapshotResult(found=data.found, snapshot_json=snapshot_json)
+
+        return self._send_request(build_payload, handle_payload)
+
+    def list_schemas(self) -> str:
+        """Return the current set of registered schemas as JSON."""
+
+        def build_payload(container):
+            request = container.init("listSchemas")
+            request.token = self._token
+
+        def handle_payload(payload: Any) -> str:
+            if payload.which() != "listSchemas":
+                raise EventDBXConnectionError("Unexpected response type for listSchemas")
+            return payload.listSchemas.schemasJson
+
+        return self._send_request(build_payload, handle_payload)
+
+    def replace_schemas(self, *, schemas_json: str) -> int:
+        """Replace the registered schemas and return the count that changed."""
+
+        if not schemas_json:
+            raise ValueError("schemas_json must be provided")
+
+        def build_payload(container):
+            request = container.init("replaceSchemas")
+            request.token = self._token
+            request.schemasJson = schemas_json
+
+        def handle_payload(payload: Any) -> int:
+            if payload.which() != "replaceSchemas":
+                raise EventDBXConnectionError("Unexpected response type for replaceSchemas")
+            return int(payload.replaceSchemas.replaced)
+
+        return self._send_request(build_payload, handle_payload)
+
+    def tenant_assign(self, *, tenant_id: str, shard_id: str) -> TenantAssignResult:
+        """Assign a tenant to a shard."""
+
+        if not tenant_id or not shard_id:
+            raise ValueError("tenant_id and shard_id must be provided")
+
+        def build_payload(container):
+            request = container.init("tenantAssign")
+            request.token = self._token
+            request.tenantId = tenant_id
+            request.shardId = shard_id
+
+        def handle_payload(payload: Any) -> TenantAssignResult:
+            if payload.which() != "tenantAssign":
+                raise EventDBXConnectionError("Unexpected response type for tenantAssign")
+            data = payload.tenantAssign
+            return TenantAssignResult(changed=data.changed, shard_id=data.shardId)
+
+        return self._send_request(build_payload, handle_payload)
+
+    def tenant_unassign(self, *, tenant_id: str) -> bool:
+        """Remove any shard assignment for a tenant."""
+
+        if not tenant_id:
+            raise ValueError("tenant_id must be provided")
+
+        def build_payload(container):
+            request = container.init("tenantUnassign")
+            request.token = self._token
+            request.tenantId = tenant_id
+
+        def handle_payload(payload: Any) -> bool:
+            if payload.which() != "tenantUnassign":
+                raise EventDBXConnectionError("Unexpected response type for tenantUnassign")
+            return payload.tenantUnassign.changed
+
+        return self._send_request(build_payload, handle_payload)
+
+    def tenant_quota_set(self, *, tenant_id: str, max_storage_mb: int) -> TenantQuotaResult:
+        """Set the storage quota for a tenant (in megabytes)."""
+
+        if not tenant_id:
+            raise ValueError("tenant_id must be provided")
+        if max_storage_mb < 0:
+            raise ValueError("max_storage_mb cannot be negative")
+
+        def build_payload(container):
+            request = container.init("tenantQuotaSet")
+            request.token = self._token
+            request.tenantId = tenant_id
+            request.maxStorageMb = max_storage_mb
+
+        def handle_payload(payload: Any) -> TenantQuotaResult:
+            if payload.which() != "tenantQuotaSet":
+                raise EventDBXConnectionError("Unexpected response type for tenantQuotaSet")
+            data = payload.tenantQuotaSet
+            quota = data.quotaMb if data.hasQuota else None
+            return TenantQuotaResult(changed=data.changed, quota_mb=quota, has_quota=data.hasQuota)
+
+        return self._send_request(build_payload, handle_payload)
+
+    def tenant_quota_clear(self, *, tenant_id: str) -> bool:
+        """Clear any storage quota for a tenant."""
+
+        if not tenant_id:
+            raise ValueError("tenant_id must be provided")
+
+        def build_payload(container):
+            request = container.init("tenantQuotaClear")
+            request.token = self._token
+            request.tenantId = tenant_id
+
+        def handle_payload(payload: Any) -> bool:
+            if payload.which() != "tenantQuotaClear":
+                raise EventDBXConnectionError("Unexpected response type for tenantQuotaClear")
+            return payload.tenantQuotaClear.changed
+
+        return self._send_request(build_payload, handle_payload)
+
+    def tenant_quota_recalc(self, *, tenant_id: str) -> int:
+        """Recalculate tenant storage usage and return the size in bytes."""
+
+        if not tenant_id:
+            raise ValueError("tenant_id must be provided")
+
+        def build_payload(container):
+            request = container.init("tenantQuotaRecalc")
+            request.token = self._token
+            request.tenantId = tenant_id
+
+        def handle_payload(payload: Any) -> int:
+            if payload.which() != "tenantQuotaRecalc":
+                raise EventDBXConnectionError("Unexpected response type for tenantQuotaRecalc")
+            return int(payload.tenantQuotaRecalc.storageBytes)
+
+        return self._send_request(build_payload, handle_payload)
+
+    def tenant_reload(self, *, tenant_id: str) -> bool:
+        """Reload the tenant metadata."""
+
+        if not tenant_id:
+            raise ValueError("tenant_id must be provided")
+
+        def build_payload(container):
+            request = container.init("tenantReload")
+            request.token = self._token
+            request.tenantId = tenant_id
+
+        def handle_payload(payload: Any) -> bool:
+            if payload.which() != "tenantReload":
+                raise EventDBXConnectionError("Unexpected response type for tenantReload")
+            return payload.tenantReload.reloaded
+
+        return self._send_request(build_payload, handle_payload)
+
+    def tenant_schema_publish(
+        self,
+        *,
+        tenant_id: str,
+        reason: str | None = None,
+        actor: str | None = None,
+        labels: Sequence[str] | None = None,
+        activate: bool = False,
+        force: bool = False,
+        reload: bool = False,
+    ) -> TenantSchemaPublishResult:
+        """Publish schemas for a tenant and optionally activate them."""
+
+        if not tenant_id:
+            raise ValueError("tenant_id must be provided")
+
+        def build_payload(container):
+            request = container.init("tenantSchemaPublish")
+            request.token = self._token
+            request.tenantId = tenant_id
+            if reason is not None:
+                request.reason = reason
+                request.hasReason = True
+            if actor is not None:
+                request.actor = actor
+                request.hasActor = True
+            if labels:
+                labels_list = request.init("labels", len(labels))
+                for idx, label in enumerate(labels):
+                    labels_list[idx] = label
+            request.activate = activate
+            request.force = force
+            request.reload = reload
+
+        def handle_payload(payload: Any) -> TenantSchemaPublishResult:
+            if payload.which() != "tenantSchemaPublish":
+                raise EventDBXConnectionError("Unexpected response type for tenantSchemaPublish")
+            data = payload.tenantSchemaPublish
+            return TenantSchemaPublishResult(
+                version_id=data.versionId,
+                activated=data.activated,
+                skipped=data.skipped,
+            )
+
+        return self._send_request(build_payload, handle_payload)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _reset_noise(self) -> None:
-        self._noise = NoiseSession(is_initiator=True) if self._use_noise else None
+        self._noise = NoiseSession(is_initiator=True, psk=self._derive_noise_psk()) if self._use_noise else None
 
     def _open_owned_transport_once(self) -> None:
         sock = socket.create_connection((self._host, self._port), timeout=self._connect_timeout)
@@ -827,6 +1189,57 @@ class EventDBXClient:
             raise ValueError("Provide either note or comment, not both")
         return note if note is not None else comment
 
+    def _normalize_publish_targets(
+        self, publish_targets: Sequence[PublishTarget | Mapping[str, Any]] | None
+    ) -> list[PublishTarget]:
+        """Normalize publish target configs into dataclass instances."""
+
+        if publish_targets is None:
+            return []
+
+        targets: list[PublishTarget] = []
+        for target in publish_targets:
+            if isinstance(target, PublishTarget):
+                targets.append(target)
+                continue
+            if isinstance(target, Mapping):
+                plugin = target.get("plugin")
+                mode = target.get("mode")
+                priority = target.get("priority")
+                targets.append(PublishTarget(plugin=plugin, mode=mode, priority=priority))
+                continue
+            raise TypeError("publish_targets must contain PublishTarget or mapping entries")
+
+        return targets
+
+    def _init_publish_targets(
+        self,
+        request: Any,
+        publish_targets: Sequence[PublishTarget | Mapping[str, Any]] | None,
+    ) -> None:
+        """Populate publishTargets list on a request if provided."""
+
+        targets = self._normalize_publish_targets(publish_targets)
+        if not targets:
+            request.hasPublishTargets = False
+            return
+
+        target_list = request.init("publishTargets", len(targets))
+        for idx, target in enumerate(targets):
+            dest = target_list[idx]
+            dest.plugin = target.plugin
+            if target.mode is not None:
+                dest.mode = target.mode
+                dest.hasMode = True
+            else:
+                dest.hasMode = False
+            if target.priority is not None:
+                dest.priority = target.priority
+                dest.hasPriority = True
+            else:
+                dest.hasPriority = False
+        request.hasPublishTargets = True
+
     def _encode_sort_options(self, sort: str | list[AggregateSortOption] | None) -> str | None:
         """Encode sort directives as a comma-separated string (``field:order``)."""
 
@@ -853,6 +1266,11 @@ class EventDBXClient:
         """Return the raw JSON string or a boolean acknowledgement."""
 
         return value if self._verbose else True
+
+    def _derive_noise_psk(self) -> bytes:
+        """Derive the Noise PSK from the control token."""
+
+        return derive_psk(self._token)
 
     def _run_with_retry(
         self,
@@ -908,23 +1326,20 @@ class EventDBXClient:
             tenant_id=self._tenant_id,
         )
 
-        if self._noise is not None:
-            first = self._noise.write_message()
-            self._transport.send_frame(first)
-            server_response = self._transport.recv_frame()
-            self._noise.read_message(server_response)
-            third = self._noise.write_message(hello.to_bytes())
-            self._transport.send_frame(third)
-            encrypted_response = self._transport.recv_frame()
-            response_bytes = self._noise.decrypt(encrypted_response)
-        else:
-            self._transport.send_frame(hello.to_bytes())
-            response_bytes = self._transport.recv_frame()
+        self._transport.send_frame(hello.to_bytes())
+        response_bytes = self._transport.recv_frame()
 
         hello_response_cm = self._schema.ControlHelloResponse.from_bytes(response_bytes)
         with _capnp_message(hello_response_cm) as hello_response:
             if not hello_response.accepted:
                 raise EventDBXHandshakeError(hello_response.message or "Handshake rejected")
+
+        # If Noise is enabled, perform the two-message NNpsk0 handshake after the initial hello.
+        if self._noise is not None:
+            first = self._noise.write_message()
+            self._transport.send_frame(first)
+            server_response = self._transport.recv_frame()
+            self._noise.read_message(server_response)
 
     def _send_request(self, payload_builder: Callable[[Any], None], payload_handler: Callable[[Any], T]) -> T:
         self._request_id += 1

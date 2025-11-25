@@ -22,7 +22,7 @@ def load_control_schema() -> Any:
 
     schema_path = resources.files("eventdbx.proto").joinpath("control.capnp")
     with resources.as_file(schema_path) as resolved:
-        return capnp.load(str(resolved))
+        return capnp.load(str(resolved), imports=[str(resolved.parent)])
 
 
 def build_control_hello(*, protocol_version: int, token: str, tenant_id: str) -> Any:

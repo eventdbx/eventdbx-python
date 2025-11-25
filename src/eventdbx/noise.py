@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+import hashlib
 from typing import Optional
 
 from noise.connection import Keypair, NoiseConnection
 
-DEFAULT_NOISE_PROTOCOL = "Noise_XX_25519_AESGCM_SHA256"
+DEFAULT_NOISE_PROTOCOL = "Noise_NNpsk0_25519_ChaChaPoly_SHA256"
 DEFAULT_NOISE_PROLOGUE = b"eventdbx-control"
 
 __all__ = [
     "DEFAULT_NOISE_PROTOCOL",
     "DEFAULT_NOISE_PROLOGUE",
+    "derive_psk",
     "NoiseSession",
     "NoiseHandshake",
 ]
@@ -27,6 +29,13 @@ class NoiseHandshake:
     remote_static: Optional[bytes]
 
 
+def derive_psk(token: str | bytes) -> bytes:
+    """Derive a 32-byte PSK from the provided token using SHA-256."""
+
+    token_bytes = token if isinstance(token, (bytes, bytearray)) else token.encode()
+    return hashlib.sha256(token_bytes).digest()
+
+
 class NoiseSession:
     """Wrapper around ``NoiseConnection`` with guardrails for EventDBX."""
 
@@ -36,6 +45,7 @@ class NoiseSession:
         is_initiator: bool,
         protocol_name: str | bytes = DEFAULT_NOISE_PROTOCOL,
         prologue: bytes = DEFAULT_NOISE_PROLOGUE,
+        psk: bytes | None = None,
         local_static: bytes | None = None,
         remote_static: bytes | None = None,
     ) -> None:
@@ -46,6 +56,13 @@ class NoiseSession:
         else:
             self._connection.set_as_responder()
         self._connection.set_prologue(prologue)
+        requires_psk = b"psk" in protocol_value.lower()
+        if requires_psk:
+            if psk is None:
+                raise ValueError("psk is required for the configured Noise protocol")
+            self._connection.set_psks(psks=[psk])
+        elif psk is not None:
+            self._connection.set_psks(psks=[psk])
         local_static_key = local_static or os.urandom(32)
         self._connection.set_keypair_from_private_bytes(Keypair.STATIC, local_static_key)
         if remote_static is not None:

@@ -53,6 +53,7 @@ packages = ["src/eventdbx"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/eventdbx/proto/control.capnp" = "eventdbx/proto/control.capnp"
+"src/eventdbx/proto/schema.capnp" = "eventdbx/proto/schema.capnp"
 
 [tool.hatch.build.targets.sdist]
 include = [

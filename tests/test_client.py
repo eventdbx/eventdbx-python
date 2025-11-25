@@ -16,6 +16,7 @@ from eventdbx.client import (
     EventDBXClient,
     EventDBXConnectionError,
     EventDBXHandshakeError,
+    PublishTarget,
     RetryOptions,
 )
 from eventdbx.control_schema import load_control_schema
@@ -360,6 +361,99 @@ def test_patch_returns_event_json() -> None:
     assert patched == "{}"
     with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
         assert sent_request.payload.which() == "patchEvent"
+
+
+def test_send_event_with_publish_targets() -> None:
+    schema = load_control_schema()
+    client, transport = _make_client()
+
+    response = schema.ControlResponse.new_message()
+    response.id = 1
+    payload = response.payload.init("appendEvent")
+    payload.eventJson = "{}"
+    transport.queue_response(response.to_bytes())
+
+    target = PublishTarget(plugin="webhook", mode="async", priority="high")
+    result = client.send_event(
+        aggregate_type="order",
+        aggregate_id="ord",
+        event_type="created",
+        payload_json="{}",
+        publish_targets=[target],
+    )
+
+    assert result == "{}"
+    with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
+        append_payload = sent_request.payload.appendEvent
+        assert append_payload.hasPublishTargets is True
+        assert len(append_payload.publishTargets) == 1
+        publish_target = append_payload.publishTargets[0]
+        assert publish_target.plugin == "webhook"
+        assert publish_target.mode == "async"
+        assert publish_target.priority == "high"
+
+
+def test_create_snapshot_returns_json() -> None:
+    schema = load_control_schema()
+    client, transport = _make_client()
+
+    response = schema.ControlResponse.new_message()
+    response.id = 1
+    payload = response.payload.init("createSnapshot")
+    payload.snapshotJson = "{}"
+    transport.queue_response(response.to_bytes())
+
+    result = client.create_snapshot(
+        aggregate_type="order",
+        aggregate_id="ord",
+        comment="checkpoint",
+    )
+
+    assert result == "{}"
+    with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
+        snapshot_payload = sent_request.payload.createSnapshot
+        assert snapshot_payload.aggregateType == "order"
+        assert snapshot_payload.aggregateId == "ord"
+        assert snapshot_payload.hasComment is True
+        assert snapshot_payload.comment == "checkpoint"
+
+
+def test_tenant_schema_publish_builds_payload() -> None:
+    schema = load_control_schema()
+    client, transport = _make_client()
+
+    response = schema.ControlResponse.new_message()
+    response.id = 1
+    payload = response.payload.init("tenantSchemaPublish")
+    payload.versionId = "v1"
+    payload.activated = True
+    payload.skipped = False
+    transport.queue_response(response.to_bytes())
+
+    result = client.tenant_schema_publish(
+        tenant_id="tenant",
+        reason="deploy",
+        actor="tester",
+        labels=["blue", "green"],
+        activate=True,
+        force=True,
+        reload=True,
+    )
+
+    assert result.version_id == "v1"
+    assert result.activated is True
+    assert result.skipped is False
+    with schema.ControlRequest.from_bytes(transport.sent_frames[1]) as sent_request:
+        publish_payload = sent_request.payload.tenantSchemaPublish
+        assert publish_payload.tenantId == "tenant"
+        assert publish_payload.hasReason is True
+        assert publish_payload.reason == "deploy"
+        assert publish_payload.hasActor is True
+        assert publish_payload.actor == "tester"
+        assert list(publish_payload.labels) == ["blue", "green"]
+        assert publish_payload.activate is True
+        assert publish_payload.force is True
+        assert publish_payload.reload is True
 
 
 def test_archive_and_restore_return_json() -> None:

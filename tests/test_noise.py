@@ -6,16 +6,16 @@ import pytest
 
 pytest.importorskip("noise.connection")
 
-from eventdbx.noise import NoiseSession
+from eventdbx.noise import NoiseSession, derive_psk
 
 
 def test_noise_handshake_and_encryption_round_trip() -> None:
-    initiator = NoiseSession(is_initiator=True)
-    responder = NoiseSession(is_initiator=False)
+    psk = derive_psk("shared-secret")
+    initiator = NoiseSession(is_initiator=True, psk=psk)
+    responder = NoiseSession(is_initiator=False, psk=psk)
 
     responder.read_message(initiator.write_message())
     initiator.read_message(responder.write_message())
-    responder.read_message(initiator.write_message())
 
     assert initiator.handshake_finished
     assert responder.handshake_finished
@@ -26,7 +26,7 @@ def test_noise_handshake_and_encryption_round_trip() -> None:
 
 
 def test_noise_encrypt_requires_handshake() -> None:
-    session = NoiseSession(is_initiator=True)
+    session = NoiseSession(is_initiator=True, psk=derive_psk("shared-secret"))
 
     with pytest.raises(RuntimeError):
         session.encrypt(b"oops")
